@@ -356,6 +356,7 @@ dependencies = [
  "num_enum",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tower",
  "tower-http",
@@ -1047,6 +1048,7 @@ dependencies = [
  "itoa",
  "libc",
  "num_threads",
+ "serde",
  "time-macros",
 ]
 

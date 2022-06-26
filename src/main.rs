@@ -8,7 +8,7 @@ use std::{
 use async_session::{MemoryStore, Session, SessionStore};
 use async_trait::async_trait;
 use axum::{
-    body::{HttpBody, Bytes},
+    body::{Bytes, HttpBody},
     error_handling::HandleErrorLayer,
     extract::{FromRequest, Query, RequestParts},
     response::{IntoResponse, Response},
@@ -76,6 +76,34 @@ impl Default for SharedState {
     }
 }
 
+mod num_bool {
+    use serde::{
+        de::{Error, Unexpected},
+        Deserialize, Deserializer,
+    };
+
+    pub fn serialize<S>(b: &bool, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u8(if *b { 1 } else { 0 })
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<bool, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match u8::deserialize(deserializer)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => Err(Error::invalid_value(
+                Unexpected::Unsigned(other.into()),
+                &"1 or 0",
+            )),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct User {
     c: String,
@@ -106,9 +134,10 @@ enum GameType {
 struct CompileTask {
     id: u32,
     name: String,
-    addtime: std::time::SystemTime,
+    addtime: time::OffsetDateTime,
     status: CompileStatus,
     op_login: GameType,
+    #[serde(with = "num_bool")]
     op_qudong: bool,
     ver: u32,
 }
@@ -117,9 +146,13 @@ struct CompileTask {
 struct CompileOption {
     name: String,
     filename: String,
+    #[serde(with = "num_bool")]
     op_safedata: bool,
+    #[serde(with = "num_bool")]
     op_delad: bool,
+    #[serde(with = "num_bool")]
     op_statistics: bool,
+    #[serde(with = "num_bool")]
     op_jiasu: bool,
     op_keywords: String,
     op_qudong: bool,
@@ -260,7 +293,7 @@ async fn submit_compile(
         CompileTask {
             id,
             name: opt.name,
-            addtime: SystemTime::now(),
+            addtime: time::OffsetDateTime::now_utc(),
             status,
             op_login: opt.op_login,
             op_qudong: opt.op_qudong,
@@ -320,7 +353,7 @@ async fn download(
 
 struct Source {
     filename: String,
-    data: Box<[u8]>
+    data: Box<[u8]>,
 }
 
 #[async_trait]
@@ -334,6 +367,7 @@ where
 
     async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
         let bytes = Bytes::from_request(req).await.unwrap();
+        
         
         todo!()
     }
