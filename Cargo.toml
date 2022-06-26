@@ -1,0 +1,37 @@
+[package]
+name = "dream-tutor"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-session = "3.0.0"
+async-trait = "0.1.56"
+axum = "0.5.9"
+axum-extra = { version = "0.3.4", features = ["cookie"] }
+base64 = "0.13.0"
+futures-util = "0.3.21"
+hyper = { version = "0.14.19", features = ["full"] }
+num_enum = "0.5.7"
+serde = { version = "1.0.137", features = ["derive"] }
+serde_json = "1.0.81"
+tokio = { version = "1.19.2", features = ["full"] }
+tower = { version = "0.4.13", features = [
+    "util",
+    "timeout",
+    "load-shed",
+    "limit",
+] }
+tower-http = { version = "0.3.4", features = [
+    "add-extension",
+    "auth",
+    "compression-full",
+    "trace",
+] }
+tracing = "0.1.35"
+tracing-subscriber = "0.3.11"
+uuid = { version = "1.1.2", features = ["v4"] }
+
+[workspace]
+members = ["proxy"]
