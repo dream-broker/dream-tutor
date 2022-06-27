@@ -1,9 +1,4 @@
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 
 use async_session::{MemoryStore, Session, SessionStore};
 use async_trait::async_trait;
@@ -13,9 +8,11 @@ use axum::{
     extract::{FromRequest, Query, RequestParts},
     response::{IntoResponse, Response},
     routing::{get, post},
-    BoxError, Extension, Form, Json, Router,
+    BoxError, Extension, Json, Router,
 };
 use axum_extra::extract::{cookie::Cookie, CookieJar};
+use dream_tutor::{crypto, GameRes};
+use encoding_rs::GBK;
 use hyper::StatusCode;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
@@ -62,16 +59,16 @@ async fn main() {
 #[derive(Debug)]
 struct SharedState {
     store: MemoryStore,
-    vfs: RwLock<HashMap<String, Box<[u8]>>>,
-    compiled: RwLock<Vec<Box<[u8]>>>,
+    files: RwLock<HashMap<String, Box<[u8]>>>,
+    results: RwLock<Vec<Result<Box<[u8]>, String>>>,
 }
 
 impl Default for SharedState {
     fn default() -> Self {
         Self {
             store: MemoryStore::new(),
-            vfs: Default::default(),
-            compiled: Default::default(),
+            files: Default::default(),
+            results: Default::default(),
         }
     }
 }
@@ -104,7 +101,7 @@ mod num_bool {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct User {
     c: String,
     a: String,
@@ -142,13 +139,15 @@ struct CompileTask {
     ver: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CompileOption {
     name: String,
     filename: String,
     #[serde(with = "num_bool")]
     op_safedata: bool,
+    /// Unknow, so just ignored
     #[serde(with = "num_bool")]
+    #[allow(unused)]
     op_delad: bool,
     #[serde(with = "num_bool")]
     op_statistics: bool,
@@ -164,6 +163,7 @@ enum IndexAction {
     Login(User),
     Submit(CompileOption),
     GetList,
+    GetReason(u32),
     Download(u32),
 }
 
@@ -188,24 +188,23 @@ where
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         match query {
-            Some(q) => {
-                if q.c != "compile" {
-                    Err(StatusCode::BAD_REQUEST)
-                } else if q.a == "Submit" {
-                    Ok(IndexAction::Submit(
-                        Form::<CompileOption>::from_request(req)
-                            .await
-                            .map_err(|_| StatusCode::BAD_REQUEST)?
-                            .0,
-                    ))
-                } else if q.a == "GetList" {
-                    Ok(IndexAction::GetList)
-                } else if q.a == "exedown" {
-                    Ok(IndexAction::Download(q.id.ok_or(StatusCode::BAD_REQUEST)?))
-                } else {
-                    Err(StatusCode::BAD_REQUEST)
+            Some(q) if q.c != "compile" => Err(StatusCode::BAD_REQUEST),
+            Some(q) => match q.a.as_str() {
+                "Submit" => {
+                    // Not use `Form::from_request` while need of converting from GBK to utf-8
+                    let bytes = Bytes::from_request(req)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let (s, _, _) = GBK.decode(&bytes);
+                    let opt = serde_urlencoded::from_str(&s)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    Ok(IndexAction::Submit(opt))
                 }
-            }
+                "GetList" => Ok(IndexAction::GetList),
+                "getreason" => Ok(IndexAction::GetReason(q.id.ok_or(StatusCode::BAD_REQUEST)?)),
+                "exedown" => Ok(IndexAction::Download(q.id.ok_or(StatusCode::BAD_REQUEST)?)),
+                _ => Err(StatusCode::BAD_REQUEST),
+            },
             None => Ok(IndexAction::Login(
                 Json::<User>::from_request(req)
                     .await
@@ -221,71 +220,109 @@ async fn dev_index(
     func: IndexAction,
     jar: CookieJar,
 ) -> Response {
-    let store = &state.store;
-
     match func {
-        IndexAction::Login(user) => dev_login(store, user, jar).await.into_response(),
-        IndexAction::Submit(opt) => {
-            let vfs = state.vfs.read().await;
-            let mut compiled = state.compiled.write().await;
-            submit_compile(store, &*vfs, &mut *compiled, opt, jar)
-                .await
-                .into_response()
-        }
-        IndexAction::GetList => get_compile_list(store, jar).await.into_response(),
-        IndexAction::Download(id) => {
-            let compiled = state.compiled.read().await;
-            download(store, &*compiled, id, jar).await.into_response()
-        }
+        IndexAction::Login(user) => dev_login(state, user, jar).await.into_response(),
+        IndexAction::Submit(opt) => submit_compile(state, opt, jar).await.into_response(),
+        IndexAction::GetList => get_compile_list(state, jar).await.into_response(),
+        IndexAction::GetReason(id) => get_fail_reason(state, jar, id).await.into_response(),
+        IndexAction::Download(id) => download(state, jar, id).await.into_response(),
     }
 }
 
+#[tracing::instrument]
 async fn dev_login(
-    store: &MemoryStore,
+    state: Arc<SharedState>,
     user: User,
     jar: CookieJar,
-) -> Result<(CookieJar, &'static str), StatusCode> {
+) -> Result<(CookieJar, &'static str), (StatusCode, &'static str)> {
+    // assertion: client should only request login as a member
     if user.a != "new_sw_login" || user.c != "member" {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "assertion failed"));
     }
     if user.username != "xyxx" || user.password != "xyxx" {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "incorrect username or password"));
     }
 
+    // create a new session for the login for this time
     let session = Session::new();
-    let session_cookie = store.store_session(session).await.unwrap().unwrap();
-    Ok((
-        jar.add(Cookie::new("PHPSESSID", session_cookie)),
-        "ok|1|2|76",
-    ))
+    let session_cookie = state
+        .store
+        .store_session(session)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store session"))?
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no valid session"))?;
+
+    // 76 for user group
+    const USER_INFO: &str = "ok|1|2|76";
+    Ok((jar.add(Cookie::new("PHPSESSID", session_cookie)), USER_INFO))
 }
 
-async fn submit_compile(
-    store: &MemoryStore,
-    vfs: &HashMap<String, Box<[u8]>>,
-    compiled: &mut Vec<Box<[u8]>>,
-    opt: CompileOption,
-    jar: CookieJar,
-) -> Result<&'static str, StatusCode> {
+async fn check_session(store: &MemoryStore, jar: CookieJar) -> Result<Session, StatusCode> {
     let session_cookie = jar
         .get("PHPSESSID")
         .map(|cookie| cookie.value())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let mut session = store
+    store
         .load_session(session_cookie.to_owned())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or(StatusCode::UNAUTHORIZED)
+}
 
-    let data = vfs.get(&opt.filename).ok_or(StatusCode::BAD_REQUEST)?;
+fn check_id_in_session(id: u32, session: Session) -> Result<(), StatusCode> {
+    session
+        .get::<HashMap<u32, CompileTask>>("tasks")
+        .and_then(|t| t.contains_key(&id).then_some(()))
+        .ok_or(StatusCode::FORBIDDEN)
+}
 
-    // TODO
-    let id = compiled.len() as u32;
-    compiled.push(data.clone());
+#[tracing::instrument]
+async fn submit_compile(
+    state: Arc<SharedState>,
+    opt: CompileOption,
+    jar: CookieJar,
+) -> Result<&'static str, StatusCode> {
+    let mut session = check_session(&state.store, jar).await?;
 
-    let status = CompileStatus::Done;
+    // Only offline mode supported for now
+    if !matches!(opt.op_login, GameType::Offline) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
+    // get pre-upload game data file
+    let files = state.files.read().await;
+    let file = files
+        .get(&opt.filename)
+        .ok_or(StatusCode::PRECONDITION_REQUIRED)?;
+
+    let build_time = time::OffsetDateTime::now_utc();
+    // TODO: compile game's lua data
+    let game_lua = file.clone().into_vec();
+
+    // build game resources
+    let res = GameRes::new()
+        .illegal_keywords(opt.op_keywords)
+        .anti_memory_cheat(opt.op_safedata)
+        .anti_speed_hack(opt.op_jiasu)
+        .statistics(opt.op_statistics)
+        .build_time(build_time)
+        .game_lua(game_lua)
+        .build();
+
+    // get compile status
+    let (result, status) = match res {
+        Ok(res) => (Ok(res.into_boxed_slice()), CompileStatus::Done),
+        Err(err) => (Err(err.to_string()), CompileStatus::Failed),
+    };
+
+    // push compiled result into results container and get a id for future use
+    let mut results = state.results.write().await;
+    let id = results.len() as u32;
+    results.push(result);
+    drop(results);
+
+    // push the compile result's information into session for client querying
     let mut tasks: HashMap<u32, CompileTask> = session.get("tasks").unwrap_or_default();
 
     tasks.insert(
@@ -293,7 +330,7 @@ async fn submit_compile(
         CompileTask {
             id,
             name: opt.name,
-            addtime: time::OffsetDateTime::now_utc(),
+            addtime: build_time,
             status,
             op_login: opt.op_login,
             op_qudong: opt.op_qudong,
@@ -308,18 +345,10 @@ async fn submit_compile(
     Ok("ok")
 }
 
-async fn get_compile_list(store: &MemoryStore, jar: CookieJar) -> Result<String, StatusCode> {
-    let session_cookie = jar
-        .get("PHPSESSID")
-        .map(|cookie| cookie.value())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+async fn get_compile_list(state: Arc<SharedState>, jar: CookieJar) -> Result<String, StatusCode> {
+    let session = check_session(&state.store, jar).await?;
 
-    let session = store
-        .load_session(session_cookie.to_owned())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
+    // get compilation tasks in this session, empty list by default
     let tasks = session.get_raw("tasks").unwrap_or_default();
 
     let mut s = String::new();
@@ -328,27 +357,41 @@ async fn get_compile_list(store: &MemoryStore, jar: CookieJar) -> Result<String,
     Ok(s)
 }
 
-async fn download(
-    store: &MemoryStore,
-    compiled: &[Box<[u8]>],
-    id: u32,
+async fn get_fail_reason(
+    state: Arc<SharedState>,
     jar: CookieJar,
-) -> Result<Vec<u8>, StatusCode> {
-    let session_cookie = jar
-        .get("PHPSESSID")
-        .map(|cookie| cookie.value())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    id: u32,
+) -> Result<String, StatusCode> {
+    let session = check_session(&state.store, jar).await?;
+    check_id_in_session(id, session)?;
 
-    let _session = store
-        .load_session(session_cookie.to_owned())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    compiled
+    let results = state.results.read().await;
+    results
         .get(id as usize)
-        .map(|res| res.clone().into_vec())
-        .ok_or(StatusCode::BAD_REQUEST)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .as_ref()
+        .err()
+        .cloned()
+        .ok_or(StatusCode::PRECONDITION_FAILED)
+}
+
+async fn download(
+    state: Arc<SharedState>,
+    jar: CookieJar,
+    id: u32,
+) -> Result<Vec<u8>, (StatusCode, &'static str)> {
+    let session = check_session(&state.store, jar)
+        .await
+        .map_err(|code| (code, "invalid session"))?;
+    check_id_in_session(id, session).map_err(|code| (code, "invalid id"))?;
+
+    // get compilation result with request id
+    let results = state.results.read().await;
+    results
+        .get(id as usize)
+        .map(|r| r.as_ref().map(|data| data.clone().into_vec()))
+        .ok_or((StatusCode::NOT_FOUND, "no such data for that id"))?
+        .map_err(|_| (StatusCode::PRECONDITION_FAILED, "compile failed"))
 }
 
 struct Source {
@@ -363,18 +406,51 @@ where
     B::Data: Send,
     B::Error: Into<BoxError>,
 {
-    type Rejection = StatusCode;
+    type Rejection = (StatusCode, &'static str);
 
     async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
         let bytes = Bytes::from_request(req).await.unwrap();
-        
-        
-        todo!()
+
+        // split bytes by number(0xc1) of space characters(0x20) as separator
+        let (mut p0, mut p1) = (None, None);
+        for (i, &b) in bytes.iter().enumerate() {
+            match (p0, b) {
+                (None, 0x20) => p0 = Some(i),
+                (None, _) => {}
+                (Some(_), 0x20) => {}
+                (Some(s), _) if i - s > 0xc0 => {
+                    p1 = Some(i);
+                    break;
+                }
+                (Some(_), _) => p0 = None,
+            }
+        }
+        let (p0, p1) = p0
+            .zip(p1)
+            .ok_or((StatusCode::BAD_REQUEST, "bad data format"))?;
+
+        let (filename, rest) = bytes.split_at(p0);
+        let (_pad, data) = rest.split_at(p1);
+
+        let mut buf = Vec::new();
+        crypto::decompress(data, &mut buf)
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "decompress error"))?;
+
+        let filename = String::from_utf8(filename.to_owned())
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "unexpected encoding"))?;
+
+        Ok(Source {
+            filename,
+            data: buf.into_boxed_slice(),
+        })
     }
 }
 
-async fn upload(source: Source) -> Result<&'static str, StatusCode> {
-    Ok("ok")
+async fn upload(Extension(state): Extension<Arc<SharedState>>, source: Source) -> &'static str {
+    let mut vfs = state.files.write().await;
+    vfs.insert(source.filename, source.data);
+
+    "ok"
 }
 
 async fn avatar() {}
