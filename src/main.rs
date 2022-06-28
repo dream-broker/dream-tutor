@@ -455,7 +455,9 @@ async fn upload(Extension(state): Extension<Arc<SharedState>>, file: UploadedFil
     "ok"
 }
 
-async fn avatar() {}
+async fn avatar() -> &'static [u8] {
+    include_bytes!("../static/avatar.jpg")
+}
 
 #[derive(Debug, Deserialize)]
 struct FileList {
