@@ -394,13 +394,14 @@ async fn download(
         .map_err(|_| (StatusCode::PRECONDITION_FAILED, "compile failed"))
 }
 
-struct Source {
+#[derive(Debug)]
+struct UploadedFile {
     filename: String,
     data: Box<[u8]>,
 }
 
 #[async_trait]
-impl<B> FromRequest<B> for Source
+impl<B> FromRequest<B> for UploadedFile
 where
     B: Send + HttpBody,
     B::Data: Send,
@@ -439,16 +440,17 @@ where
         let filename = String::from_utf8(filename.to_owned())
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "unexpected encoding"))?;
 
-        Ok(Source {
+        Ok(UploadedFile {
             filename,
             data: buf.into_boxed_slice(),
         })
     }
 }
 
-async fn upload(Extension(state): Extension<Arc<SharedState>>, source: Source) -> &'static str {
-    let mut vfs = state.files.write().await;
-    vfs.insert(source.filename, source.data);
+#[tracing::instrument]
+async fn upload(Extension(state): Extension<Arc<SharedState>>, file: UploadedFile) -> &'static str {
+    let mut files = state.files.write().await;
+    files.insert(file.filename, file.data);
 
     "ok"
 }
