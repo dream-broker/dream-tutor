@@ -130,7 +130,7 @@ enum GameType {
 #[derive(Debug, Serialize, Deserialize)]
 struct CompileTask {
     id: u32,
-    name: String,
+    filename: String,
     addtime: time::OffsetDateTime,
     status: CompileStatus,
     op_login: GameType,
@@ -141,6 +141,7 @@ struct CompileTask {
 
 #[derive(Debug, Deserialize)]
 struct CompileOption {
+    #[allow(unused)]
     name: String,
     filename: String,
     #[serde(with = "num_bool")]
@@ -340,7 +341,7 @@ async fn submit_compile(
         id,
         CompileTask {
             id,
-            name: option.name,
+            filename: option.filename,
             addtime: time::OffsetDateTime::now_utc(),
             status,
             op_login: option.op_login,
