@@ -277,50 +277,61 @@ fn check_id_in_session(id: u32, session: Session) -> Result<(), StatusCode> {
         .ok_or(StatusCode::FORBIDDEN)
 }
 
+fn compile(file: &[u8], option: &CompileOption) -> Result<Box<[u8]>, String> {
+    // only offline mode supported for now
+    if !matches!(option.op_login, GameType::Offline) {
+        return Err("unsupported game type".to_owned());
+    }
+
+    if !option.op_delad {
+        return Err("unknown option delad".to_owned());
+    }
+
+    if !option.op_jiasu && !option.op_qudong && !option.op_safedata {
+        return Err("unsupported option".to_owned());
+    }
+
+    // build game resources
+    GameRes::new()
+        .illegal_keywords(&option.op_keywords)
+        .anti_memory_cheat(option.op_safedata)
+        .anti_speed_hack(option.op_jiasu)
+        .statistics(option.op_statistics)
+        .game_lua(file)
+        .build()
+        .map(|v| v.into_boxed_slice())
+        .map_err(|err| err.to_string())
+}
+
 #[tracing::instrument]
 async fn submit_compile(
     state: Arc<SharedState>,
-    opt: CompileOption,
+    option: CompileOption,
     jar: CookieJar,
 ) -> Result<&'static str, StatusCode> {
     let mut session = check_session(&state.store, jar).await?;
 
-    // Only offline mode supported for now
-    if !matches!(opt.op_login, GameType::Offline) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
     // get pre-upload game data file
     let files = state.files.read().await;
     let file = files
-        .get(&opt.filename)
+        .get(&option.filename)
         .ok_or(StatusCode::PRECONDITION_REQUIRED)?;
 
-    let build_time = time::OffsetDateTime::now_utc();
-    // TODO: compile game's lua data
-    let game_lua = file.clone().into_vec();
-
-    // build game resources
-    let res = GameRes::new()
-        .illegal_keywords(opt.op_keywords)
-        .anti_memory_cheat(opt.op_safedata)
-        .anti_speed_hack(opt.op_jiasu)
-        .statistics(opt.op_statistics)
-        .build_time(build_time)
-        .game_lua(game_lua)
-        .build();
-
-    // get compile status
-    let (result, status) = match res {
-        Ok(res) => (Ok(res.into_boxed_slice()), CompileStatus::Done),
-        Err(err) => (Err(err.to_string()), CompileStatus::Failed),
+    // compile start get compile status
+    let result = compile(file, &option);
+    let status = match result {
+        Ok(_) => CompileStatus::Done,
+        Err(_) => CompileStatus::Failed,
     };
 
     // push compiled result into results container and get a id for future use
-    let mut results = state.results.write().await;
-    let id = results.len() as u32;
-    results.push(result);
-    drop(results);
+
+    let id = {
+        let mut results = state.results.write().await;
+        let id = results.len() as u32;
+        results.push(result);
+        id
+    };
 
     // push the compile result's information into session for client querying
     let mut tasks: HashMap<u32, CompileTask> = session.get("tasks").unwrap_or_default();
@@ -329,12 +340,12 @@ async fn submit_compile(
         id,
         CompileTask {
             id,
-            name: opt.name,
-            addtime: build_time,
+            name: option.name,
+            addtime: time::OffsetDateTime::now_utc(),
             status,
-            op_login: opt.op_login,
-            op_qudong: opt.op_qudong,
-            ver: opt.ver,
+            op_login: option.op_login,
+            op_qudong: option.op_qudong,
+            ver: option.ver,
         },
     );
 
