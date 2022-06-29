@@ -1,10 +1,11 @@
 use encoding_rs::GBK;
+use include_dir::{include_dir, Dir};
 use indexmap::IndexMap;
 use std::fmt::Write;
 
 use crate::{crypto, lua};
 
-const BUILDIN_BUNDLED_LIBRARY: &[u8] = &[];
+const BUILDIN_BUNDLED_LIBRARIES: Dir = include_dir!("$CARGO_MANIFEST_DIR/static/bundle");
 
 pub struct Bundles {
     entries: IndexMap<&'static str, Vec<u8>>,
@@ -12,9 +13,14 @@ pub struct Bundles {
 
 impl Bundles {
     pub fn with_adaptor(adaptor: Vec<u8>) -> Self {
-        let mut entries = IndexMap::with_capacity(3);
+        let mut entries = IndexMap::with_capacity(43);
         entries.insert("adaptor.lua", adaptor);
-        entries.insert("bundles.lua", BUILDIN_BUNDLED_LIBRARY.to_owned());
+
+        for file in BUILDIN_BUNDLED_LIBRARIES.files() {
+            let filename = file.path().file_name().unwrap().to_str().unwrap();
+            let content = file.contents();
+            entries.insert(filename, content.to_owned());
+        }
         Self { entries }
     }
 
