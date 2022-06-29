@@ -35,7 +35,10 @@ pub fn decompress(data: &[u8], buf: &mut Vec<u8>) -> Result<(), io::Error> {
 
     let magic = u32::from_le_bytes(buf[..4].try_into().unwrap());
     if magic != COMPRESS_MAGIC {
-        panic!("");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{:X}", magic),
+        ));
     }
 
     let size = u32::from_le_bytes(buf[4..].try_into().unwrap());
