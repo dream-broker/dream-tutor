@@ -445,11 +445,19 @@ where
         let (filename, rest) = bytes.split_at(p0);
         let (_pad, data) = rest.split_at(p1);
 
+        // get real name (`123` in `..\compileplatform\upload\123.res`)
+        let filename = filename
+            .rsplit(|b| *b == b'\\')
+            .next()
+            .and_then(|s|s.split(|b|*b == b'.').next())
+            .ok_or((StatusCode::BAD_REQUEST, "filename not found"))?
+            .to_owned();
+
         let mut buf = Vec::new();
         crypto::decompress(data, &mut buf)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "decompress error"))?;
 
-        let filename = String::from_utf8(filename.to_owned())
+        let filename = String::from_utf8(filename)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "unexpected encoding"))?;
 
         Ok(UploadedFile {
