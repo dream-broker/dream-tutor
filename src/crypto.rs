@@ -45,7 +45,8 @@ pub fn decompress(data: &[u8], buf: &mut Vec<u8>) -> Result<(), io::Error> {
 }
 
 pub fn compress(data: &[u8], buf: &mut Vec<u8>) -> Result<usize, io::Error> {
+    let len: u32 = data.len().try_into().unwrap();
     buf.extend(COMPRESS_MAGIC.to_le_bytes());
-    buf.extend(data.len().to_le_bytes());
+    buf.extend(len.to_le_bytes());
     ZlibEncoder::new(data, Compression::default()).read_to_end(buf)
 }
