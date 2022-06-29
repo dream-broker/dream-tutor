@@ -128,10 +128,13 @@ enum GameType {
     Offline = 3,
 }
 
+time::serde::format_description!(no_sub_second, PrimitiveDateTime, "[year]-[month]-[day] [hour]:[minute]:[second]");
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CompileTask {
     id: u32,
     filename: String,
+    #[serde(with = "no_sub_second")]
     addtime: time::PrimitiveDateTime,
     status: CompileStatus,
     op_login: GameType,
