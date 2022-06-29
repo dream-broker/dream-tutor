@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 
 use async_session::{MemoryStore, Session, SessionStore};
 use async_trait::async_trait;
@@ -8,34 +8,35 @@ use axum::{
     extract::{FromRequest, Query, RequestParts},
     response::{IntoResponse, Response},
     routing::{get, post},
-    BoxError, Extension, Json, Router,
+    BoxError, Extension, Form, Router,
 };
-use axum_extra::extract::{cookie::Cookie, CookieJar};
+use axum_extra::extract::CookieJar;
 use dream_tutor::{crypto, GameRes};
 use encoding_rs::GBK;
-use hyper::StatusCode;
+use hyper::{HeaderMap, StatusCode};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::metadata::LevelFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_filter(LevelFilter::TRACE))
         .init();
 
     let dev_routes = Router::new()
-        .route("/index.php", post(dev_index))
+        .route("/index.php", post(dev_index).get(dev_index))
         .route("/api/upload.php", post(upload));
 
     let bbs_routes = Router::new().route("/uc_server/avatar.php", get(avatar));
 
     let app = Router::new()
-        .route("/filelist", get(filelist))
+        .route("/filelist/lock_filelist1.txt", get(filelist))
         .nest("/dmdev", dev_routes)
         .nest("/dmbbs", bbs_routes)
         .layer(
@@ -155,17 +156,25 @@ struct CompileOption {
     #[serde(with = "num_bool")]
     op_jiasu: bool,
     op_keywords: String,
+    #[serde(with = "num_bool")]
     op_qudong: bool,
     op_login: GameType,
     ver: u32,
 }
 
+#[derive(Debug)]
 enum IndexAction {
     Login(User),
     Submit(CompileOption),
     GetList,
     GetReason(u32),
     Download(u32),
+}
+#[derive(Debug, Deserialize)]
+struct IndexActionType {
+    c: String,
+    a: String,
+    id: Option<u32>,
 }
 
 #[async_trait]
@@ -177,29 +186,32 @@ where
 {
     type Rejection = StatusCode;
 
+    #[tracing::instrument(name = "IndexAction", skip(req))]
     async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        #[derive(Deserialize)]
-        struct IndexFuncDesc {
-            c: String,
-            a: String,
-            id: Option<u32>,
-        }
-
-        let Query(query) = Query::<Option<IndexFuncDesc>>::from_request(req)
+        let query = Query::<IndexActionType>::from_request(req)
             .await
-            .map_err(|_| StatusCode::BAD_REQUEST)?;
+            .map_err(|err| tracing::info!("serialize query error: {:?}", err))
+            .ok();
+        tracing::trace!("query: {:?}", query);
+
         match query {
-            Some(q) if q.c != "compile" => Err(StatusCode::BAD_REQUEST),
-            Some(q) => match q.a.as_str() {
+            Some(Query(q)) if q.c != "compile" => Err(StatusCode::BAD_REQUEST),
+            Some(Query(q)) => match q.a.as_str() {
                 "Submit" => {
                     // Not use `Form::from_request` while need of converting from GBK to utf-8
-                    let bytes = Bytes::from_request(req)
-                        .await
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    let bytes = Bytes::from_request(req).await.map_err(|err| {
+                        tracing::error!("into bytes error: {:?}", err);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+
                     let (s, _, _) = GBK.decode(&bytes);
-                    let opt = serde_urlencoded::from_str(&s)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                    Ok(IndexAction::Submit(opt))
+                    tracing::debug!("compile request: {}", s);
+
+                    let option = serde_urlencoded::from_str(&s).map_err(|err| {
+                        tracing::error!("urlencoded: {:?}", err);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                    Ok(IndexAction::Submit(option))
                 }
                 "GetList" => Ok(IndexAction::GetList),
                 "getreason" => Ok(IndexAction::GetReason(q.id.ok_or(StatusCode::BAD_REQUEST)?)),
@@ -207,22 +219,27 @@ where
                 _ => Err(StatusCode::BAD_REQUEST),
             },
             None => Ok(IndexAction::Login(
-                Json::<User>::from_request(req)
+                Form::<User>::from_request(req)
                     .await
-                    .map_err(|_| StatusCode::BAD_REQUEST)?
+                    .map_err(|err| {
+                        tracing::trace!("err: {:?}", err);
+                        StatusCode::BAD_REQUEST
+                    })?
                     .0,
             )),
         }
     }
 }
 
+#[tracing::instrument]
 async fn dev_index(
     Extension(state): Extension<Arc<SharedState>>,
     func: IndexAction,
     jar: CookieJar,
 ) -> Response {
+    tracing::trace!("dev_index");
     match func {
-        IndexAction::Login(user) => dev_login(state, user, jar).await.into_response(),
+        IndexAction::Login(user) => dev_login(state, user).await.into_response(),
         IndexAction::Submit(opt) => submit_compile(state, opt, jar).await.into_response(),
         IndexAction::GetList => get_compile_list(state, jar).await.into_response(),
         IndexAction::GetReason(id) => get_fail_reason(state, jar, id).await.into_response(),
@@ -234,8 +251,7 @@ async fn dev_index(
 async fn dev_login(
     state: Arc<SharedState>,
     user: User,
-    jar: CookieJar,
-) -> Result<(CookieJar, &'static str), (StatusCode, &'static str)> {
+) -> Result<(HeaderMap, &'static str), (StatusCode, &'static str)> {
     // assertion: client should only request login as a member
     if user.a != "new_sw_login" || user.c != "member" {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "assertion failed"));
@@ -245,29 +261,60 @@ async fn dev_login(
     }
 
     // create a new session for the login for this time
-    let session = Session::new();
-    let session_cookie = state
-        .store
-        .store_session(session)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store session"))?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no valid session"))?;
+    let session_id = {
+        let session = Session::new();
+        let session_cookie = state
+            .store
+            .store_session(session)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to store session"))?
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no valid session"))?;
 
-    // 76 for user group
+        base64::encode_config(session_cookie, base64::CRYPT)
+    };
+
+    // build header
+    let mut header = HeaderMap::new();
+    header.insert(
+        "Set-Cookie",
+        format!("PHPSESSID={session_id}; path=/").parse().unwrap(),
+    );
+    header.insert("Expires", "Thu, 19 Nov 1981 08:52:00 GMT".parse().unwrap());
+    header.insert(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, post-check=0, pre-check=0"
+            .parse()
+            .unwrap(),
+    );
+
+    // 1 for uid, 76 for user group
     const USER_INFO: &str = "ok|1|2|76";
-    Ok((jar.add(Cookie::new("PHPSESSID", session_cookie)), USER_INFO))
+    Ok((header, USER_INFO))
 }
 
+#[tracing::instrument]
 async fn check_session(store: &MemoryStore, jar: CookieJar) -> Result<Session, StatusCode> {
     let session_cookie = jar
         .get("PHPSESSID")
-        .map(|cookie| cookie.value())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map(|cookie| base64::decode_config(cookie.value(), base64::CRYPT))
+        .ok_or(StatusCode::UNAUTHORIZED)?
+        .map(String::from_utf8)
+        .map_err(|err| {
+            tracing::info!("base64 decode: {:#?}", err);
+            StatusCode::BAD_REQUEST
+        })?
+        .map_err(|err| {
+            tracing::info!("from_utf8: {:#?}", err);
+            StatusCode::BAD_REQUEST
+        })?;
 
     store
         .load_session(session_cookie.to_owned())
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|err| {
+            tracing::error!("err: {:?}", err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
@@ -331,7 +378,12 @@ async fn submit_compile(
     };
 
     // compile start get compile status
-    let result = compile(file, &option, build_time);
+    let result = compile(file, &option, build_time).and_then(|bytes| {
+        let mut buf = Vec::new();
+        crypto::compress(&bytes, &mut buf)
+            .map(|_| buf.into_boxed_slice())
+            .map_err(|err| err.to_string())
+    });
     let status = match result {
         Ok(_) => CompileStatus::Done,
         Err(_) => CompileStatus::Failed,
@@ -362,13 +414,15 @@ async fn submit_compile(
         },
     );
 
-    session
-        .insert("tasks", tasks)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    session.insert("tasks", tasks).map_err(|err| {
+        tracing::error!("insert task error: {:?}", err);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok("ok")
 }
 
+#[tracing::instrument]
 async fn get_compile_list(state: Arc<SharedState>, jar: CookieJar) -> Result<String, StatusCode> {
     let session = check_session(&state.store, jar).await?;
 
@@ -381,11 +435,14 @@ async fn get_compile_list(state: Arc<SharedState>, jar: CookieJar) -> Result<Str
     Ok(s)
 }
 
+#[tracing::instrument]
 async fn get_fail_reason(
     state: Arc<SharedState>,
     jar: CookieJar,
     id: u32,
 ) -> Result<String, StatusCode> {
+    tracing::trace!("id = {:?}", id);
+
     let session = check_session(&state.store, jar).await?;
     check_id_in_session(id, session)?;
 
@@ -399,6 +456,7 @@ async fn get_fail_reason(
         .ok_or(StatusCode::PRECONDITION_FAILED)
 }
 
+#[tracing::instrument]
 async fn download(
     state: Arc<SharedState>,
     jar: CookieJar,
@@ -433,6 +491,7 @@ where
 {
     type Rejection = (StatusCode, &'static str);
 
+    #[tracing::instrument(name = "UploadedFile", skip_all)]
     async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
         let bytes = Bytes::from_request(req).await.unwrap();
 
@@ -444,7 +503,7 @@ where
                 (None, _) => {}
                 (Some(_), 0x20) => {}
                 (Some(s), _) if i - s > 0xc0 => {
-                    p1 = Some(i);
+                    p1 = Some(i - s);
                     break;
                 }
                 (Some(_), _) => p0 = None,
@@ -465,9 +524,13 @@ where
             .ok_or((StatusCode::BAD_REQUEST, "filename not found"))?
             .to_owned();
 
+        tracing::debug!("filename = {:X?}", filename);
+
         let mut buf = Vec::new();
-        crypto::decompress(data, &mut buf)
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "decompress error"))?;
+        crypto::decompress(data, &mut buf).map_err(|err| {
+            tracing::error!("decompress error: {:?}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "decompress error")
+        })?;
 
         let filename = String::from_utf8(filename)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "unexpected encoding"))?;
@@ -498,6 +561,7 @@ struct FileList {
 
 #[tracing::instrument]
 async fn filelist(Query(FileList { c: id }): Query<FileList>) -> &'static str {
+    tracing::trace!("enter");
     "1DDE3CA781B0431700B6591BB8FE403D"
 }
 
