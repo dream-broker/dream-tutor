@@ -1,6 +1,5 @@
 use bundle::Bundles;
 use encoding_rs::GBK;
-use md5::{Digest, Md5};
 use time::{format_description, PrimitiveDateTime};
 
 pub mod crypto;
@@ -65,13 +64,6 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
             format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap();
 
         let time = self.build_time.unwrap().format(&time_fmt).unwrap();
-        let check = {
-            let mut check = time.clone();
-            check.push_str(self.filename.unwrap());
-            check.into_bytes()
-        };
-
-        let hash = hex::encode(Md5::digest(check));
 
         let s = format!(
             r#"
@@ -89,7 +81,7 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
             enable_statistics = self.statistics,
             uid = 0,
             gid = 0,
-            hash = hash,
+            hash = self.filename.unwrap(),
             time = time,
             keywords = self.keywords.unwrap_or_default()
         );
