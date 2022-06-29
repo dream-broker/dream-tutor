@@ -131,7 +131,7 @@ enum GameType {
 struct CompileTask {
     id: u32,
     filename: String,
-    addtime: time::OffsetDateTime,
+    addtime: time::PrimitiveDateTime,
     status: CompileStatus,
     op_login: GameType,
     #[serde(with = "num_bool")]
@@ -278,7 +278,11 @@ fn check_id_in_session(id: u32, session: Session) -> Result<(), StatusCode> {
         .ok_or(StatusCode::FORBIDDEN)
 }
 
-fn compile(file: &[u8], option: &CompileOption) -> Result<Box<[u8]>, String> {
+fn compile(
+    file: &[u8],
+    option: &CompileOption,
+    build_time: time::PrimitiveDateTime,
+) -> Result<Box<[u8]>, String> {
     // only offline mode supported for now
     if !matches!(option.op_login, GameType::Offline) {
         return Err("unsupported game type".to_owned());
@@ -298,6 +302,8 @@ fn compile(file: &[u8], option: &CompileOption) -> Result<Box<[u8]>, String> {
         .anti_memory_cheat(option.op_safedata)
         .anti_speed_hack(option.op_jiasu)
         .statistics(option.op_statistics)
+        .build_time(build_time)
+        .filename(&option.filename)
         .game_lua(file)
         .build()
         .map(|v| v.into_boxed_slice())
@@ -318,15 +324,21 @@ async fn submit_compile(
         .get(&option.filename)
         .ok_or(StatusCode::PRECONDITION_REQUIRED)?;
 
+    // maybe use local time zone in future?
+    let build_time = {
+        let offseted = time::OffsetDateTime::now_utc();
+        time::PrimitiveDateTime::new(offseted.date(), offseted.time())
+    };
+
     // compile start get compile status
-    let result = compile(file, &option);
+    let result = compile(file, &option, build_time);
     let status = match result {
         Ok(_) => CompileStatus::Done,
         Err(_) => CompileStatus::Failed,
     };
 
-    // push compiled result into results container and get a id for future use
-
+    // push compilation result into results
+    // get a id for future use
     let id = {
         let mut results = state.results.write().await;
         let id = results.len() as u32;
@@ -334,7 +346,7 @@ async fn submit_compile(
         id
     };
 
-    // push the compile result's information into session for client querying
+    // push the compilation detial into session for client querying
     let mut tasks: HashMap<u32, CompileTask> = session.get("tasks").unwrap_or_default();
 
     tasks.insert(
@@ -342,7 +354,7 @@ async fn submit_compile(
         CompileTask {
             id,
             filename: option.filename,
-            addtime: time::OffsetDateTime::now_utc(),
+            addtime: build_time,
             status,
             op_login: option.op_login,
             op_qudong: option.op_qudong,
@@ -449,7 +461,7 @@ where
         let filename = filename
             .rsplit(|b| *b == b'\\')
             .next()
-            .and_then(|s|s.split(|b|*b == b'.').next())
+            .and_then(|s| s.split(|b| *b == b'.').next())
             .ok_or((StatusCode::BAD_REQUEST, "filename not found"))?
             .to_owned();
 

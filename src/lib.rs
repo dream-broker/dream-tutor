@@ -1,6 +1,7 @@
 use bundle::Bundles;
 use encoding_rs::GBK;
-use time::{format_description, OffsetDateTime};
+use md5::{Digest, Md5};
+use time::{format_description, PrimitiveDateTime};
 
 pub mod crypto;
 
@@ -9,13 +10,15 @@ mod lua;
 mod bundle;
 
 #[derive(Debug, Clone, Default)]
-pub struct GameRes<'a, 'b> {
+pub struct GameRes<'a, 'b, 'c> {
     keywords: Option<&'a str>,
     database: Option<&'b [u8]>,
     statistics: bool,
+    build_time: Option<PrimitiveDateTime>,
+    filename: Option<&'c str>,
 }
 
-impl<'a, 'b> GameRes<'a, 'b> {
+impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
     pub fn new() -> Self {
         GameRes {
             ..Default::default()
@@ -37,6 +40,16 @@ impl<'a, 'b> GameRes<'a, 'b> {
         self
     }
 
+    pub fn build_time(mut self, time: PrimitiveDateTime) -> Self {
+        self.build_time = Some(time);
+        self
+    }
+
+    pub fn filename(mut self, name: &'c str) -> Self {
+        self.filename = Some(name);
+        self
+    }
+
     pub fn anti_speed_hack(self, switch: bool) -> Self {
         assert!(switch);
         self
@@ -50,6 +63,15 @@ impl<'a, 'b> GameRes<'a, 'b> {
     fn create_adaptor(&self) -> Vec<u8> {
         let time_fmt =
             format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap();
+
+        let time = self.build_time.unwrap().format(&time_fmt).unwrap();
+        let check = {
+            let mut check = time.clone();
+            check.push_str(self.filename.unwrap());
+            check.into_bytes()
+        };
+
+        let hash = hex::encode(Md5::digest(check));
 
         let s = format!(
             r#"
@@ -67,8 +89,8 @@ impl<'a, 'b> GameRes<'a, 'b> {
             enable_statistics = self.statistics,
             uid = 0,
             gid = 0,
-            hash = "",
-            time = OffsetDateTime::now_utc().format(&time_fmt).unwrap(),
+            hash = hash,
+            time = time,
             keywords = self.keywords.unwrap_or_default()
         );
 
