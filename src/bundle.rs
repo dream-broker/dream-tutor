@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use crate::{crypto, lua};
 
+const BUILDIN_BUNDLED_LIBRARIES_DESC: &[&str] = include!("../static/bundle.txt");
 const BUILDIN_BUNDLED_LIBRARIES: Dir = include_dir!("$CARGO_MANIFEST_DIR/static/bundle");
 
 pub struct Bundles {
@@ -16,11 +17,14 @@ impl Bundles {
         let mut entries = IndexMap::with_capacity(43);
         entries.insert("adaptor.lua", adaptor);
 
-        for file in BUILDIN_BUNDLED_LIBRARIES.files() {
-            let filename = file.path().file_name().unwrap().to_str().unwrap();
-            let content = file.contents();
+        for filename in BUILDIN_BUNDLED_LIBRARIES_DESC {
+            let content = BUILDIN_BUNDLED_LIBRARIES
+                .get_file(filename)
+                .unwrap()
+                .contents();
             entries.insert(filename, content.to_owned());
         }
+
         Self { entries }
     }
 
