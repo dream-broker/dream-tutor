@@ -70,7 +70,7 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
         local f1 = 核心.数据统计
         核心.数据统计 = function(gid, uid, unk, hash, time)
             if {enable_statistics} then
-                f1({gid}, {uid}, 1, "{hash}", "{time}")
+                f1({gid}, {uid}, 0, "{hash}", "{time}")
             end
         end
         local f2 = 核心.anti_hacking
@@ -79,8 +79,8 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
         end
         "#,
             enable_statistics = self.statistics,
-            uid = 999,
-            gid = 1,
+            uid = 1,
+            gid = 999,
             hash = self.filename.unwrap(),
             time = time,
             keywords = self.keywords.unwrap_or_default()
