@@ -91,16 +91,17 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
     }
 
     pub fn build(&self) -> Result<Vec<u8>, mlua::Error> {
-        // compile database to bytecode
         let database = self.database.expect("database should set");
-        let bytecode = lua::compile(database)?;
+        // compile database to bytecode
+        let database = lua::compile("database.lua", database)?;
 
         // insert bundled library adaptor
         let adaptor = self.create_adaptor();
 
+        let adaptor = lua::compile("adaptor.lua", adaptor)?;
         // build bundles
-        let mut bundles = Bundles::with_adaptor(lua::compile(adaptor)?);
-        bundles.set_database(bytecode);
+        let mut bundles = Bundles::with_adaptor(adaptor);
+        bundles.set_database(database);
         let packed = bundles.pack()?;
 
         Ok(packed)

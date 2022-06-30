@@ -43,7 +43,7 @@ impl Bundles {
             s.push('\n');
         }
 
-        let mut bytecode = lua::compile(s)?;
+        let mut bytecode = lua::compile("loader", s)?;
         crypto::encrypt_res(&mut bytecode);
         Ok(bytecode)
     }
