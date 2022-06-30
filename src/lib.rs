@@ -68,9 +68,9 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
         let s = format!(
             r#"
         local f1 = 核心.数据统计
-        核心.数据统计 = function(uid, gid, unk, hash, time)
+        核心.数据统计 = function(gid, uid, unk, hash, time)
             if {enable_statistics} then
-                f1({uid}, {gid}, 1, "{hash}", "{time}")
+                f1({gid}, {uid}, 1, "{hash}", "{time}")
             end
         end
         local f2 = 核心.anti_hacking
@@ -79,8 +79,8 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
         end
         "#,
             enable_statistics = self.statistics,
-            uid = 0,
-            gid = 0,
+            uid = 999,
+            gid = 1,
             hash = self.filename.unwrap(),
             time = time,
             keywords = self.keywords.unwrap_or_default()
