@@ -92,6 +92,14 @@ impl<'a, 'b, 'c> GameRes<'a, 'b, 'c> {
 
     pub fn build(&self) -> Result<Vec<u8>, mlua::Error> {
         let database = self.database.expect("database should set");
+        // check if database too small
+        if database.len() < 0x200 {
+            return Err(mlua::Error::external("invalid database"));
+        }
+
+        // trim plugin info header
+        let (_header, database) = database.split_at(0x200);
+
         // compile database to bytecode
         let database = lua::compile("database.lua", database)?;
 
